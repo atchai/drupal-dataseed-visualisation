@@ -1,0 +1,220 @@
+<?php
+
+/**
+ * Implements hook_menu().
+ */
+function dataseed_visualisation_menu() {
+    return array(
+        'visualisation/%/%' => array(
+            'title' => 'Visualisation',
+            'page callback' => 'dataseed_visualisation_page',
+            'page arguments' => array(1, 2),
+            'access arguments' => array('access dataseed visualisation'),
+            'type' => MENU_CALLBACK,
+        ),
+    );
+}
+
+/**
+ * Implements hook_permission().
+ */
+function dataseed_visualisation_permission() {
+    return array(
+        'access dataseed visualisation' => array(
+            'title' => t('Access Dataseed visualisation'),
+            'description' => t('View and interact with an embedded Dataseed visualisation.'),
+        ),
+    );
+}
+
+/**
+ * Implements hook_theme().
+ */
+function dataseed_visualisation_theme() {
+    return array(
+        'dataseed_visualisation_page' => array(
+            'template' => 'dataseed-visualisation-page',
+            'variables' => array(
+                'dataset_id' => NULL,
+                'visualisation_id' => NULL,
+                'args' => NULL,
+            ),
+        ),
+    );
+}
+
+/**
+ * Implements hook_library().
+ */
+function dataseed_visualisation_library() {
+    return array(
+        'visualisation' => array(
+            'title' => 'Dataseed Visualisation',
+            'website' => 'http://dataseedapp.com',
+            'version' => '0.2',
+//            'js' => array(
+//                drupal_get_path('module', 'dataseed_visualisation') . '/lib/dist/js/dataseed.js' => array(),
+//            ),
+            'css' => array(
+                drupal_get_path('module', 'dataseed_visualisation') . '/lib/dist/css/dataseed.css' => array(
+                    'type' => 'file',
+                    'media' => 'screen',
+                ),
+            ),
+        ),
+    );
+}
+
+/**
+ * Visualisation page callback
+ */
+function dataseed_visualisation_page($dataset_id, $visualisation_id) {
+
+    // Add embed JS and CSS
+    if (!drupal_add_library('dataseed_visualisation', 'visualisation')) {
+        watchdog('dataseed_visualisation', 'Unable to load dataseed library', array(), WATCHDOG_ERROR);
+        return MENU_NOT_FOUND;
+    }
+
+    //@TODO check the dataset existence with DataseedConnection::datasetExists()
+
+    // Get API base URL
+    $options = dataseed_get_settings();
+    $api_url = $options['scheme'] . '://' . $options['host'] . ':' . $options['port'];
+
+    // Sanatise user input
+    $dataset_id = dataseed_visualisation_sanatise($dataset_id);
+    $visualisation_id = dataseed_visualisation_sanatise($visualisation_id);
+
+    // Get cut
+    if (!isset($_GET['cut']) || empty($_GET)) {
+        $cut = '{}';
+    } else {
+        $cut = drupal_json_encode($_GET['cut']);
+    }
+
+    // Get authentication/authorisation parameters
+    $auth = drupal_json_encode(dataseed_visualisation_auth($dataset_id, $visualisation_id));
+
+    /*
+     * @TODO we should add dataseed.js in the HEADER as a library but if we do
+     * that the visualisation doesn't work on Chrome (BASE_URL is not initialised
+     * and module.config() of requirejs is undefined)
+     *
+     * ref. https://www.assembla.com/spaces/b-l0hszkOr4RsXacwqEsg8/tickets/151#/activity/ticket:
+     */
+    drupal_add_js(
+      drupal_get_path('module', 'dataseed_visualisation') .
+      '/lib/dist/js/dataseed.js',
+      array(
+        'scope' => 'footer',
+        'weight' => 49
+      )
+    );
+
+    // Add embed JS
+    drupal_add_js(<<<EOF
+        require.config({
+            'config': {
+                'app': {
+                    'BASE_URL': '$api_url'
+                },
+                './models/authSingleton': {
+                    'AUTH': $auth
+                }
+            }
+        });
+        require(['./views/dataset'], function(DatasetEmbedView) {
+            new DatasetEmbedView({
+                'el': document.getElementById('visualisation-container'),
+                'id': '$dataset_id',
+                'visualisation_id': '$visualisation_id',
+                'cut': $cut
+            });
+        });
+EOF
+    , array('type' => 'inline', 'scope' => 'footer', 'weight' => 50));
+
+    // Return render array
+    return array(
+        '#theme' => 'dataseed_visualisation_page',
+        '#dataset_id' => 'score',
+        '#visualisation_id' => 'chart0',
+        '#args' => array(),
+    );
+
+}
+
+/**
+ * Helper function to sanatise data input for use in JS
+ * TODO: Use a proper XSS filter (we can't use filter_xss() as this is meant for HTML, not JS strings)
+ */
+function dataseed_visualisation_sanatise($str) {
+    return preg_replace('/[^\da-z_]/i', '', $str);
+}
+
+/**
+ * Get authentication parameters
+ */
+function dataseed_visualisation_auth($dataset_id, $visualisation_id) {
+
+    // Check user token and key have been set
+    $user_token = variable_get('dataseed_user_token');
+    $user_key = variable_get('dataseed_user_key');
+
+    if (empty($user_token) || empty($user_key)) {
+        return array();
+    }
+
+    // Check hash extension is available
+    if (!function_exists('hash_algos') || !function_exists('hash_hmac')) {
+        drupal_set_message(
+            t(
+                'Your version of PHP doesn\'t support the !link. You must install this extension before you can access private datasets.',
+                array('!link' => l('Hash extension', 'http://php.net/manual/en/book.hash.php'))
+            ),
+            'error'
+        );
+        return;
+    }
+
+    // Check SHA512 hash function is available
+    if (!in_array('sha512', hash_algos())) {
+        drupal_set_message(
+            t(
+                'Your version of PHP doesn\'t support the SHA512 hash function. Please ensure that the !link is installed properly.',
+                array('!link' => l('PHP Hash extension', 'http://php.net/manual/en/book.hash.php'))
+            ),
+            'error'
+        );
+        return;
+    }
+
+    // Get mandatory visualisation filters
+    $filters = new StdClass();
+    drupal_alter('dataseed_visualisation_filters', $dataset_id, $visualisation_id, $filters);
+
+    // Build auth message
+    $msg = new StdClass();
+    $msg->user = $user_token;
+    $msg->dataset = $dataset_id;
+    $msg->filters = $filters;
+
+    // Get message timestamp in UTC
+    $tz = date_default_timezone_get();
+    date_default_timezone_set('UTC');
+    $msg->timestamp = time();
+    date_default_timezone_set($tz);
+
+    // Encode message for transport and hashing
+    $msg = base64_encode(drupal_json_encode($msg));
+
+    // Calculate HMAC and encode for transport
+    $hmac = base64_encode(hash_hmac('sha512', $msg, $user_key, TRUE));
+
+    return array(
+        'msg' => $msg,
+        'hmac' => $hmac,
+    );
+
+}

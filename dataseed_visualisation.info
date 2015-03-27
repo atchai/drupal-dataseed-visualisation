@@ -1,0 +1,5 @@
+name = Dataseed Visualisation
+description = Embed visualisations from Dataseed into your site
+dependencies[] = dataseed
+core = 7.x
+package = Dataseed
