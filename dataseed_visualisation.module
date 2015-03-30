@@ -50,11 +50,8 @@ function dataseed_visualisation_library() {
     return array(
         'visualisation' => array(
             'title' => 'Dataseed Visualisation',
-            'website' => 'http://dataseedapp.com',
+            'website' => 'https://getdataseed.com',
             'version' => '0.2',
-//            'js' => array(
-//                drupal_get_path('module', 'dataseed_visualisation') . '/lib/dist/js/dataseed.js' => array(),
-//            ),
             'css' => array(
                 drupal_get_path('module', 'dataseed_visualisation') . '/lib/dist/css/dataseed.css' => array(
                     'type' => 'file',
@@ -76,26 +73,6 @@ function dataseed_visualisation_page($dataset_id, $visualisation_id) {
         return MENU_NOT_FOUND;
     }
 
-    //@TODO check the dataset existence with DataseedConnection::datasetExists()
-
-    // Get API base URL
-    $options = dataseed_get_settings();
-    $api_url = $options['scheme'] . '://' . $options['host'] . ':' . $options['port'];
-
-    // Sanatise user input
-    $dataset_id = dataseed_visualisation_sanatise($dataset_id);
-    $visualisation_id = dataseed_visualisation_sanatise($visualisation_id);
-
-    // Get cut
-    if (!isset($_GET['cut']) || empty($_GET)) {
-        $cut = '{}';
-    } else {
-        $cut = drupal_json_encode($_GET['cut']);
-    }
-
-    // Get authentication/authorisation parameters
-    $auth = drupal_json_encode(dataseed_visualisation_auth($dataset_id, $visualisation_id));
-
     /*
      * @TODO we should add dataseed.js in the HEADER as a library but if we do
      * that the visualisation doesn't work on Chrome (BASE_URL is not initialised
@@ -112,28 +89,37 @@ function dataseed_visualisation_page($dataset_id, $visualisation_id) {
       )
     );
 
+    // Get API base URL
+    $options = dataseed_get_settings();
+    $api_url = $options['scheme'] . '://' . $options['host'] . ':' . $options['port'];
+
+    // Get cut
+    $cut = (empty($_GET['cut'])) ? new StdClass() : $_GET['cut'];
+
+    // Get authentication/authorisation parameters
+    $auth = dataseed_visualisation_auth($dataset_id, $visualisation_id);
+
     // Add embed JS
-    drupal_add_js(<<<EOF
-        require.config({
-            'config': {
-                'app': {
-                    'BASE_URL': '$api_url'
-                },
-                './models/authSingleton': {
-                    'AUTH': $auth
-                }
-            }
-        });
-        require(['./views/dataset'], function(DatasetEmbedView) {
-            new DatasetEmbedView({
-                'el': document.getElementById('visualisation-container'),
-                'id': '$dataset_id',
-                'visualisation_id': '$visualisation_id',
-                'cut': $cut
-            });
-        });
-EOF
-    , array('type' => 'inline', 'scope' => 'footer', 'weight' => 50));
+    $js = sprintf('require.config(%s);require(["./views/dataset"],function(V){new V(%s);});',
+        drupal_json_encode(array(
+            'config' => array(
+                'app' => array(
+                    'BASE_URL' => $api_url,
+                ),
+                'models/authSingleton' => array(
+                    'AUTH' => $auth,
+                ),
+            ),
+        )),
+        drupal_json_encode(array(
+            'el' => '#visualisation-container',
+            'id' => $dataset_id,
+            'visualisation_id' => $visualisation_id,
+            'cut' => $cut,
+        ))
+    );
+
+    drupal_add_js($js, array('type' => 'inline', 'scope' => 'footer', 'weight' => 50));
 
     // Return render array
     return array(
@@ -146,14 +132,6 @@ EOF
 }
 
 /**
- * Helper function to sanatise data input for use in JS
- * TODO: Use a proper XSS filter (we can't use filter_xss() as this is meant for HTML, not JS strings)
- */
-function dataseed_visualisation_sanatise($str) {
-    return preg_replace('/[^\da-z_]/i', '', $str);
-}
-
-/**
  * Get authentication parameters
  */
 function dataseed_visualisation_auth($dataset_id, $visualisation_id) {
@@ -163,7 +141,7 @@ function dataseed_visualisation_auth($dataset_id, $visualisation_id) {
     $user_key = variable_get('dataseed_user_key');
 
     if (empty($user_token) || empty($user_key)) {
-        return array();
+        return new StdClass();
     }
 
     // Check hash extension is available
@@ -175,7 +153,7 @@ function dataseed_visualisation_auth($dataset_id, $visualisation_id) {
             ),
             'error'
         );
-        return;
+        return new StdClass();
     }
 
     // Check SHA512 hash function is available
@@ -187,7 +165,7 @@ function dataseed_visualisation_auth($dataset_id, $visualisation_id) {
             ),
             'error'
         );
-        return;
+        return new StdClass();
     }
 
     // Get mandatory visualisation filters
